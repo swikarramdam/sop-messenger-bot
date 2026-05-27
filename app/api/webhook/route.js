@@ -1,5 +1,5 @@
 import { after } from 'next/server';
-import { getHistory, saveHistory, getBotStatus, setBotStatus } from '@/lib/redis';
+import { getHistory, saveHistory, getBotStatus, setBotStatus, setLastPendingClient, getLastPendingClient } from '@/lib/redis';
 import { getGeminiResponse } from '@/lib/gemini';
 import {
   sendText,
@@ -51,10 +51,12 @@ async function handleEvent(event) {
   // Log all sender IDs during setup — needed to find Sandesh/Swikar PSIDs
   console.log('Event sender PSID:', senderId, '| type:', getEventType(event));
 
-  // message_echo = page sent a message (human operator replied manually)
+  // message_echo = page sent a message
+  // Only disable bot if the message was sent by a human operator (app not set as sender)
+  // Automated page replies have app_id set — ignore those, only act on manual replies
   if (event.message?.is_echo) {
-    // recipientId is the client's PSID
-    if (recipientId) {
+    const isAutomated = event.message?.app_id != null;
+    if (!isAutomated && recipientId) {
       await setBotStatus(recipientId, false);
       console.log(`Bot disabled for client ${recipientId} (human took over)`);
     }
@@ -75,13 +77,14 @@ async function handleEvent(event) {
         senderId === process.env.SWIKAR_PSID;
 
       if (isAuthorized) {
-        const parts = text.split(' ');
-        const targetPsid = parts[1];
+        const parts = text.trim().split(' ');
+        // /resume with no args → use last pending client for this operator
+        const targetPsid = parts[1] || await getLastPendingClient(senderId);
         if (targetPsid) {
           await setBotStatus(targetPsid, true);
-          await sendText(senderId, `Bot re-enabled for client ${targetPsid}.`);
+          await sendText(senderId, `Bot re-enabled for client.`);
         } else {
-          await sendText(senderId, 'Usage: /resume {client_psid}');
+          await sendText(senderId, 'No pending client found. Use /resume {psid}.');
         }
       }
       return;
@@ -139,7 +142,7 @@ async function runAIPipeline(psid, userMessage) {
       psid,
       lastMessage: userMessage,
       reason: 'QR sent, awaiting payment screenshot verification',
-    });
+    }, setLastPendingClient);
   }
 
   // Handoff notification (frustration / complex query)
@@ -148,7 +151,7 @@ async function runAIPipeline(psid, userMessage) {
       psid,
       lastMessage: userMessage,
       reason: 'Complex query or client needs human assistance',
-    });
+    }, setLastPendingClient);
   }
 
   // Save updated history
