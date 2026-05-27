@@ -51,17 +51,8 @@ async function handleEvent(event) {
   // Log all sender IDs during setup — needed to find Sandesh/Swikar PSIDs
   console.log('Event sender PSID:', senderId, '| type:', getEventType(event));
 
-  // message_echo = page sent a message
-  // Only disable bot if the message was sent by a human operator (app not set as sender)
-  // Automated page replies have app_id set — ignore those, only act on manual replies
-  if (event.message?.is_echo) {
-    const isAutomated = event.message?.app_id != null;
-    if (!isAutomated && recipientId) {
-      await setBotStatus(recipientId, false);
-      console.log(`Bot disabled for client ${recipientId} (human took over)`);
-    }
-    return;
-  }
+  // Ignore all echoes — bot is disabled only via explicit /pause command from operator
+  if (event.message?.is_echo) return;
 
   // Skip delivery/read receipts
   if (event.delivery || event.read) return;
@@ -70,22 +61,31 @@ async function handleEvent(event) {
   if (event.message?.text) {
     const text = event.message.text.trim();
 
-    // /resume command — only Sandesh or Swikar can use this
-    if (text.startsWith('/resume')) {
-      const isAuthorized =
-        senderId === process.env.SANDESH_PSID ||
-        senderId === process.env.SWIKAR_PSID;
+    // Operator commands — only Sandesh or Swikar
+    const isAuthorized =
+      senderId === process.env.SANDESH_PSID ||
+      senderId === process.env.SWIKAR_PSID;
 
-      if (isAuthorized) {
-        const parts = text.trim().split(' ');
-        // /resume with no args → use last pending client for this operator
-        const targetPsid = parts[1] || await getLastPendingClient(senderId);
-        if (targetPsid) {
-          await setBotStatus(targetPsid, true);
-          await sendText(senderId, `Bot re-enabled for client.`);
-        } else {
-          await sendText(senderId, 'No pending client found. Use /resume {psid}.');
-        }
+    if (text.startsWith('/resume') && isAuthorized) {
+      const parts = text.trim().split(' ');
+      const targetPsid = parts[1] || await getLastPendingClient(senderId);
+      if (targetPsid) {
+        await setBotStatus(targetPsid, true);
+        await sendText(senderId, `Bot re-enabled for client.`);
+      } else {
+        await sendText(senderId, 'No pending client found. Use /resume {psid}.');
+      }
+      return;
+    }
+
+    if (text.startsWith('/pause') && isAuthorized) {
+      const parts = text.trim().split(' ');
+      const targetPsid = parts[1] || await getLastPendingClient(senderId);
+      if (targetPsid) {
+        await setBotStatus(targetPsid, false);
+        await sendText(senderId, `Bot paused for client.`);
+      } else {
+        await sendText(senderId, 'Usage: /pause {psid}');
       }
       return;
     }
