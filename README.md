@@ -1,36 +1,68 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SOP Writers Nepal — Messenger Bot
 
-## Getting Started
+Facebook Messenger chatbot for SOP Writers Nepal. Handles client queries via AI, quotes prices, collects requirements, sends payment QR, and notifies human operators when needed.
 
-First, run the development server:
+## Stack
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- Next.js 16 (App Router) on Vercel
+- Google Gemini API (gemini-2.0-flash)
+- Upstash Redis (conversation history + bot toggle)
+- Facebook Messenger Platform (Webhooks + Send API)
+
+## Setup
+
+### 1. Environment Variables
+
+Fill in `.env.local` (for local dev) and add all vars to Vercel project settings:
+
+```
+PAGE_ACCESS_TOKEN=       # Facebook Page Access Token
+VERIFY_TOKEN=            # Any string — must match what you enter in Meta dashboard
+GEMINI_API_KEY=          # From Google AI Studio (aistudio.google.com)
+UPSTASH_REDIS_REST_URL=  # From Upstash dashboard
+UPSTASH_REDIS_REST_TOKEN=
+SANDESH_PSID=            # Sandesh's Messenger Page-Scoped ID (see below)
+SWIKAR_PSID=             # Swikar's Messenger Page-Scoped ID (see below)
+QR_IMAGE_URL=            # Public URL of payment QR image
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Deploy to Vercel
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+```bash
+npm i -g vercel
+vercel
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Webhook URL will be: `https://your-app.vercel.app/api/webhook`
 
-## Learn More
+### 3. Meta App Setup
 
-To learn more about Next.js, take a look at the following resources:
+1. Go to developers.facebook.com, create an app, add Messenger product
+2. Generate a Page Access Token for the SOP Writers Nepal page
+3. Add webhook URL, set verify token to match VERIFY_TOKEN
+4. Subscribe to: `messages`, `message_echoes`
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 4. Get Sandesh + Swikar PSIDs
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Both should message the SOP Writers Nepal page from their personal Facebook accounts. Check Vercel function logs — every incoming message logs `Event sender PSID: <id>`. Copy those IDs into env vars.
 
-## Deploy on Vercel
+### 5. Vercel Plan Note
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`vercel.json` sets `maxDuration: 30s` for the webhook function. Hobby plan caps at 10s — upgrade to Pro if Gemini responses are timing out.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Bot Commands (for operators)
+
+Send these to the SOP Writers Nepal page from your personal account:
+
+- `/resume {client_psid}` — re-enables bot for a conversation after human takeover
+
+## How it works
+
+1. Client messages page → webhook fires
+2. Bot checks if it's active for that conversation (Redis key `bot:active:{psid}`)
+3. If active: sends typing indicator, calls Gemini with full conversation history
+4. Gemini response may contain hidden markers:
+   - `[SEND_QR]` — triggers QR payment image + handoff notification to Sandesh + Swikar
+   - `[HANDOFF_NEEDED]` — triggers handoff notification without disabling bot
+5. When Sandesh/Swikar manually reply from the page, `message_echo` fires → bot auto-disables for that conversation
+6. Operator sends `/resume {psid}` to re-enable bot
