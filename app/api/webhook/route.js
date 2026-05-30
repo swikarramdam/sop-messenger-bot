@@ -168,24 +168,20 @@ async function runAIPipeline(psid, userMessage) {
     }).catch((err) => console.error('QStash schedule error:', err));
   }
 
-  // QR payment flow — send image, fallback notifies operator to send manually
+  // QR payment flow — try image first, fall back to URL link
   if (sendQR) {
-    let qrDelivered = false;
     try {
       await sendImage(psid, process.env.QR_IMAGE_URL);
       console.log(`QR image sent to ${psid}`);
-      qrDelivered = true;
     } catch (err) {
-      console.error('QR image send failed:', err);
-      // Don't send URL — notify operator to send QR manually instead
+      console.error('QR image failed, sending URL:', err);
+      await sendText(psid, `Here is our payment QR: ${process.env.QR_IMAGE_URL}\n\nOpen the link, scan the QR, and send us a screenshot once done.`);
     }
 
     await sendHandoffNotification({
       psid,
       lastMessage: userMessage,
-      reason: qrDelivered
-        ? 'QR sent, awaiting payment screenshot verification'
-        : 'QR image failed to send — please send QR to client manually',
+      reason: 'QR sent, awaiting payment screenshot verification',
       context: handoffContext,
     }, setLastPendingClient);
 
