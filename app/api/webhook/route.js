@@ -1,5 +1,5 @@
 import { after } from 'next/server';
-import { getHistory, saveHistory, getBotStatus, setBotStatus, setLastPendingClient, getLastPendingClient } from '@/lib/redis';
+import { getHistory, saveHistory, getBotStatus, setBotStatus, setLastPendingClient, getLastPendingClient, setLastBotMessage, setLastClientMessage, registerActivePsid } from '@/lib/redis';
 import { getGeminiResponse } from '@/lib/gemini';
 import {
   sendText,
@@ -7,6 +7,21 @@ import {
   sendTypingOn,
   sendHandoffNotification,
 } from '@/lib/messenger';
+
+function sanitizeResponse(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')       // **bold**
+    .replace(/\*(.+?)\*/g, '$1')            // *italic*
+    .replace(/__(.+?)__/g, '$1')            // __bold__
+    .replace(/_(.+?)_/g, '$1')              // _italic_
+    .replace(/#{1,6}\s+/g, '')              // ## headings
+    .replace(/^\s*[-*•]\s+/gm, '')          // - bullet points
+    .replace(/^\s*\d+\.\s+/gm, '')          // 1. numbered lists
+    .replace(/`{1,3}([^`]*)`{1,3}/g, '$1') // `code`
+    .replace(/\[(.+?)\]\(.+?\)/g, '$1')    // [links](url)
+    .replace(/\n{3,}/g, '\n\n')            // collapse excess newlines
+    .trim();
+}
 
 // GET — Meta webhook verification handshake
 export async function GET(request) {
@@ -90,6 +105,10 @@ async function handleEvent(event) {
       return;
     }
 
+    // Record client message timestamp for nudge tracking
+    await setLastClientMessage(senderId);
+    await registerActivePsid(senderId);
+
     // Normal client message — run AI pipeline
     await runAIPipeline(senderId, text);
   }
@@ -121,22 +140,28 @@ async function runAIPipeline(psid, userMessage) {
   const needsHandoff = responseText.includes('[HANDOFF_NEEDED]');
   const sendQR = responseText.includes('[SEND_QR]');
 
-  // Strip all markers from the text client will see
-  const cleanResponse = responseText
-    .replace('[HANDOFF_NEEDED]', '')
-    .replace('[SEND_QR]', '')
-    .trim();
+  console.log(`Markers — SEND_QR: ${sendQR}, HANDOFF: ${needsHandoff}`);
+
+  // Strip markers then sanitize markdown before sending to client
+  const cleanResponse = sanitizeResponse(
+    responseText
+      .replace('[HANDOFF_NEEDED]', '')
+      .replace('[SEND_QR]', '')
+  );
 
   // Send clean response to client
   await sendText(psid, cleanResponse);
+  await setLastBotMessage(psid);
 
-  // QR payment flow
+  // QR payment flow — Gemini already wrote the payment message, just send the image
   if (sendQR) {
-    await sendText(
-      psid,
-      'Great! Please make half payment to proceed. Scan the QR below and send us a screenshot once done. Our team will verify and begin working on your SOP.'
-    );
-    await sendImage(psid, process.env.QR_IMAGE_URL);
+    try {
+      await sendImage(psid, process.env.QR_IMAGE_URL);
+      console.log(`QR sent to ${psid}, URL: ${process.env.QR_IMAGE_URL}`);
+    } catch (err) {
+      console.error('QR image send failed, sending URL fallback:', err);
+      await sendText(psid, `Here is the payment QR link: ${process.env.QR_IMAGE_URL}`);
+    }
 
     await sendHandoffNotification({
       psid,
