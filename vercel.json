@@ -3,11 +3,5 @@
     "app/api/webhook/route.js": {
       "maxDuration": 30
     }
-  },
-  "crons": [
-    {
-      "path": "/api/cron/nudge",
-      "schedule": "*/2 * * * *"
-    }
-  ]
+  }
 }

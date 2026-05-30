@@ -1,5 +1,8 @@
 import { after } from 'next/server';
+import { Client as QStashClient } from '@upstash/qstash';
 import { getHistory, saveHistory, getBotStatus, setBotStatus, setLastPendingClient, getLastPendingClient, setLastBotMessage, setLastClientMessage, registerActivePsid } from '@/lib/redis';
+
+const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN });
 import { getGeminiResponse } from '@/lib/gemini';
 import {
   sendText,
@@ -139,44 +142,66 @@ async function runAIPipeline(psid, userMessage) {
   // Extract control markers before sending to client
   const needsHandoff = responseText.includes('[HANDOFF_NEEDED]');
   const sendQR = responseText.includes('[SEND_QR]');
+  const contextMatch = responseText.match(/\[CONTEXT:\s*([^\]]+)\]/);
+  const handoffContext = contextMatch ? contextMatch[1].trim() : null;
 
-  console.log(`Markers — SEND_QR: ${sendQR}, HANDOFF: ${needsHandoff}`);
+  console.log(`Markers — SEND_QR: ${sendQR}, HANDOFF: ${needsHandoff}, CONTEXT: ${handoffContext}`);
 
-  // Strip markers then sanitize markdown before sending to client
+  // Strip all markers then sanitize markdown before sending to client
   const cleanResponse = sanitizeResponse(
     responseText
       .replace('[HANDOFF_NEEDED]', '')
       .replace('[SEND_QR]', '')
+      .replace(/\[CONTEXT:[^\]]*\]/g, '')
   );
 
   // Send clean response to client
   await sendText(psid, cleanResponse);
   await setLastBotMessage(psid);
 
-  // QR payment flow — Gemini already wrote the payment message, just send the image
+  // Schedule nudge via QStash — fires after 2 mins if client goes silent
+  if (!sendQR && !needsHandoff) {
+    qstash.publishJSON({
+      url: `https://sop-messenger-bot.vercel.app/api/nudge`,
+      delay: 120,
+      body: { psid, scheduledAt: Date.now() },
+    }).catch((err) => console.error('QStash schedule error:', err));
+  }
+
+  // QR payment flow — send image, fallback notifies operator to send manually
   if (sendQR) {
+    let qrDelivered = false;
     try {
       await sendImage(psid, process.env.QR_IMAGE_URL);
-      console.log(`QR sent to ${psid}, URL: ${process.env.QR_IMAGE_URL}`);
+      console.log(`QR image sent to ${psid}`);
+      qrDelivered = true;
     } catch (err) {
-      console.error('QR image send failed, sending URL fallback:', err);
-      await sendText(psid, `Here is the payment QR link: ${process.env.QR_IMAGE_URL}`);
+      console.error('QR image send failed:', err);
+      // Don't send URL — notify operator to send QR manually instead
     }
 
     await sendHandoffNotification({
       psid,
       lastMessage: userMessage,
-      reason: 'QR sent, awaiting payment screenshot verification',
+      reason: qrDelivered
+        ? 'QR sent, awaiting payment screenshot verification'
+        : 'QR image failed to send — please send QR to client manually',
+      context: handoffContext,
     }, setLastPendingClient);
+
+    // Disable bot — writer takes over from here
+    await setBotStatus(psid, false);
   }
 
-  // Handoff notification (frustration / complex query)
+  // Handoff notification (frustration / complex query) — disable bot, writer takes over
   if (needsHandoff && !sendQR) {
     await sendHandoffNotification({
       psid,
       lastMessage: userMessage,
       reason: 'Complex query or client needs human assistance',
+      context: handoffContext,
     }, setLastPendingClient);
+    await setBotStatus(psid, false);
   }
 
   // Save updated history
